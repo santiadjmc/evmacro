@@ -35,6 +35,9 @@ fn d20() -> f64 {
 fn d8() -> f64 {
     8.0
 }
+fn d50() -> f64 {
+    50.0
+}
 fn one() -> u32 {
     1
 }
@@ -103,6 +106,8 @@ pub enum Action {
         char_ms: f64,
         #[serde(default = "d8")]
         hold_ms: f64,
+        #[serde(default = "d50")]
+        settle_ms: f64,
         #[serde(default = "one")]
         count: u32,
     },

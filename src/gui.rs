@@ -310,6 +310,7 @@ fn macro_editor(
                             text: String::new(),
                             char_ms: 8.0,
                             hold_ms: 8.0,
+                            settle_ms: 50.0,
                             count: 1,
                         }
                     }
@@ -548,6 +549,7 @@ fn macro_editor(
             text,
             char_ms,
             hold_ms,
+            settle_ms,
             count,
         } => {
             ui.label("Text to type");
@@ -589,6 +591,27 @@ fn macro_editor(
                 }
             }
             ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Speed:");
+                for (name, tip, c, h, s) in [
+                    ("Instant", "Desktop apps and terminals", 1.0, 1.0, 10.0),
+                    ("Fast", "Most apps and many games", 8.0, 8.0, 50.0),
+                    (
+                        "Game-safe",
+                        "Games that read input once per frame (60 FPS or lower)",
+                        20.0,
+                        20.0,
+                        120.0,
+                    ),
+                ] {
+                    let on = *char_ms == c && *hold_ms == h && *settle_ms == s;
+                    if ui.selectable_label(on, name).on_hover_text(tip).clicked() {
+                        (*char_ms, *hold_ms, *settle_ms) = (c, h, s);
+                    }
+                }
+                let per = (*char_ms + *hold_ms).max(0.01);
+                ui.weak(format!("≈ {:.0} chars/s", 1000.0 / per));
+            });
             egui::Grid::new("type")
                 .num_columns(2)
                 .spacing([16.0, 8.0])
@@ -610,6 +633,18 @@ fn macro_editor(
                             .speed(0.1)
                             .suffix(" ms")
                             .max_decimals(2),
+                    );
+                    ui.end_row();
+                    ui.label("Pause before special keys").on_hover_text(
+                        "Waits after typed text before {Enter}, {Tab}, combos, etc. so the app has \
+                         processed every character first",
+                    );
+                    ui.add(
+                        egui::DragValue::new(settle_ms)
+                            .range(0.0..=10_000.0)
+                            .speed(0.5)
+                            .suffix(" ms")
+                            .max_decimals(1),
                     );
                     ui.end_row();
                     ui.label("Repeat count");

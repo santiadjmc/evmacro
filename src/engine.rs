@@ -504,18 +504,42 @@ fn wait_until(deadline: Instant, stop: &AtomicBool) -> bool {
     }
 }
 
-fn type_tokens(o: &mut Out, toks: &[Tok], lay: &Layout, char_ms: f64, hold_ms: f64, stop: &AtomicBool) -> bool {
-    let gap = dur_ms(char_ms);
-    let hold = dur_ms(hold_ms);
+#[derive(Clone, Copy)]
+struct Timing {
+    gap: Duration,
+    hold: Duration,
+    settle: Duration,
+}
+
+impl Timing {
+    fn new(char_ms: f64, hold_ms: f64, settle_ms: f64) -> Self {
+        Timing {
+            gap: dur_ms(char_ms),
+            hold: dur_ms(hold_ms),
+            settle: dur_ms(settle_ms),
+        }
+    }
+}
+
+fn type_tokens(o: &mut Out, toks: &[Tok], lay: &Layout, tm: Timing, stop: &AtomicBool) -> bool {
+    let Timing { gap, hold, settle } = tm;
     let pause = |d: Duration| d.is_zero() || wait_until(Instant::now() + d, stop);
     let mut missing: Vec<char> = Vec::new();
+    let mut after_text = false;
     for t in toks {
         if stop.load(Relaxed) {
             return false;
         }
+        if after_text && matches!(t, Tok::Combo { .. } | Tok::Down(_)) {
+            after_text = false;
+            if !pause(settle) {
+                return false;
+            }
+        }
         match t {
             Tok::Char(c) => match lay.strokes(*c) {
                 Some(strokes) => {
+                    after_text = true;
                     for s in strokes {
                         let mut mods = Vec::with_capacity(2);
                         if s.shift {
@@ -559,6 +583,7 @@ fn type_tokens(o: &mut Out, toks: &[Tok], lay: &Layout, char_ms: f64, hold_ms: f
             Tok::Down(k) => o.down(&[*k]),
             Tok::Up(k) => o.up(&[*k]),
             Tok::Wait(ms) => {
+                after_text = false;
                 if !pause(dur_ms(*ms)) {
                     return false;
                 }
@@ -688,7 +713,13 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
                                 o.sh.log(format!("Sequence: invalid text step '{text}'"));
                                 continue;
                             };
-                            if !type_tokens(o, &toks, lay, char_ms / speed, 8.0 / speed, stop) {
+                            if !type_tokens(
+                                o,
+                                &toks,
+                                lay,
+                                Timing::new(char_ms / speed, char_ms / speed, 50.0 / speed),
+                                stop,
+                            ) {
                                 return;
                             }
                             t = Instant::now();
@@ -708,6 +739,7 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
             text,
             char_ms,
             hold_ms,
+            settle_ms,
             count,
         } => {
             let toks = match typing::parse(text) {
@@ -722,7 +754,7 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
             o.sh.release_physical_mods();
             let mut n = 0u32;
             loop {
-                if !type_tokens(o, &toks, &lay, *char_ms, *hold_ms, stop) {
+                if !type_tokens(o, &toks, &lay, Timing::new(*char_ms, *hold_ms, *settle_ms), stop) {
                     return;
                 }
                 n += 1;
