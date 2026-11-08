@@ -238,6 +238,13 @@ impl Shared {
         self.release_keys(&ks);
     }
 
+    fn effective_mode(m: &Macro) -> Mode {
+        match m.action {
+            Action::Type { .. } => Mode::Toggle,
+            _ => m.mode,
+        }
+    }
+
     fn mods_ok(&self, m: &Macro) -> bool {
         let p = self.pressed.lock();
         m.modifiers.iter().all(|k| p.contains(&k.0))
@@ -326,7 +333,7 @@ impl Shared {
 
         let cfg = self.config.read().clone();
 
-        if self.recording.load(Relaxed) {
+        if self.recording.load(Relaxed) && cfg.toggle_key != Some(K(code)) {
             if cfg.record_stop_key == Some(K(code)) {
                 self.stop_recording(false);
                 self.captured.lock().insert(code);
@@ -379,7 +386,7 @@ impl Shared {
                             self.release_keys(&k);
                         }
                     }
-                    _ if m.mode == Mode::Hold => self.stop_runner(i),
+                    _ if Self::effective_mode(m) == Mode::Hold => self.stop_runner(i),
                     _ => {}
                 }
             }
@@ -390,13 +397,22 @@ impl Shared {
             return !was_blocked;
         }
 
+        let candidates: Vec<(usize, &Macro)> = cfg
+            .macros
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.enabled && m.trigger == Some(K(code)))
+            .collect();
+        let best = candidates
+            .iter()
+            .filter(|(_, m)| self.mods_ok(m))
+            .map(|(_, m)| m.modifiers.len())
+            .max();
         let mut block = false;
-        for (i, m) in cfg.macros.iter().enumerate() {
-            if !m.enabled || m.trigger != Some(K(code)) {
-                continue;
-            }
+        for (i, m) in candidates {
+            let chosen = best == Some(m.modifiers.len()) && self.mods_ok(m);
             if let Action::Remap { to } = &m.action {
-                if self.mods_ok(m) && !to.is_empty() {
+                if chosen && !to.is_empty() {
                     let k: Vec<u16> = to.iter().map(|k| k.0).collect();
                     self.press_keys(&k);
                     self.remaps.lock().insert(i, (m.clone(), k));
@@ -404,9 +420,9 @@ impl Shared {
                 }
                 continue;
             }
-            match m.mode {
+            match Self::effective_mode(m) {
                 Mode::Hold => {
-                    if self.mods_ok(m) {
+                    if chosen {
                         self.spawn_runner(i, m);
                         block |= m.block_trigger;
                     }
@@ -415,7 +431,7 @@ impl Shared {
                     if self.is_running(i) {
                         self.stop_runner(i);
                         block |= m.block_trigger;
-                    } else if self.mods_ok(m) {
+                    } else if chosen {
                         self.spawn_runner(i, m);
                         block |= m.block_trigger;
                     }
@@ -672,7 +688,7 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
                                 o.sh.log(format!("Sequence: invalid text step '{text}'"));
                                 continue;
                             };
-                            if !type_tokens(o, &toks, lay, char_ms / speed, 3.0 / speed, stop) {
+                            if !type_tokens(o, &toks, lay, char_ms / speed, 8.0 / speed, stop) {
                                 return;
                             }
                             t = Instant::now();

@@ -32,8 +32,8 @@ fn d10() -> f64 {
 fn d20() -> f64 {
     20.0
 }
-fn d3() -> f64 {
-    3.0
+fn d8() -> f64 {
+    8.0
 }
 fn one() -> u32 {
     1
@@ -99,9 +99,9 @@ pub enum Action {
     Type {
         #[serde(default)]
         text: String,
-        #[serde(default = "d5")]
+        #[serde(default = "d8")]
         char_ms: f64,
-        #[serde(default = "d3")]
+        #[serde(default = "d8")]
         hold_ms: f64,
         #[serde(default = "one")]
         count: u32,
@@ -141,7 +141,7 @@ pub enum Step {
     },
     Type {
         text: String,
-        #[serde(default = "d5")]
+        #[serde(default = "d8")]
         char_ms: f64,
     },
 }

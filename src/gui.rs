@@ -190,7 +190,7 @@ fn new_step(kind: &str, key: K) -> Step {
         "Wheel" => Step::Wheel { amount: -1 },
         "Type" => Step::Type {
             text: String::new(),
-            char_ms: 5.0,
+            char_ms: 8.0,
         },
         _ => Step::HWheel { amount: 1 },
     }
@@ -206,6 +206,7 @@ fn macro_editor(
     exclusive: bool,
     recording: bool,
     lay: &Layout,
+    conflicts: &[String],
     req: &mut Option<Req>,
     delete: &mut bool,
 ) {
@@ -236,9 +237,15 @@ fn macro_editor(
             ui.end_row();
 
             ui.label("Trigger");
-            if key_btn(ui, m.trigger) {
-                *req = Some(Req::Bind(Bind::Trigger(i)));
-            }
+            ui.horizontal(|ui| {
+                if key_btn(ui, m.trigger) {
+                    *req = Some(Req::Bind(Bind::Trigger(i)));
+                }
+                if !conflicts.is_empty() {
+                    ui.colored_label(WARN, format!("⚠ same hotkey as: {}", conflicts.join(", ")))
+                        .on_hover_text("Both macros will run at once. Give one of them a modifier (e.g. Ctrl).");
+                }
+            });
             ui.end_row();
 
             ui.label("Modifiers")
@@ -248,7 +255,11 @@ fn macro_editor(
             }
             ui.end_row();
 
-            if !is_remap {
+            if matches!(m.action, Action::Type { .. }) {
+                ui.label("Mode");
+                ui.weak("Tap the trigger to type · tap again to cancel");
+                ui.end_row();
+            } else if !is_remap {
                 ui.label("Mode");
                 ui.horizontal(|ui| {
                     ui.radio_value(&mut m.mode, Mode::Hold, "Hold")
@@ -297,8 +308,8 @@ fn macro_editor(
                         m.mode = Mode::Toggle;
                         Action::Type {
                             text: String::new(),
-                            char_ms: 5.0,
-                            hold_ms: 3.0,
+                            char_ms: 8.0,
+                            hold_ms: 8.0,
                             count: 1,
                         }
                     }
@@ -424,7 +435,7 @@ fn macro_editor(
 
             let mut action: Option<(usize, i8)> = None;
             egui::ScrollArea::vertical()
-                .max_height(ui.available_height() - 40.0)
+                .max_height(420.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     egui::Grid::new("steps")
@@ -1167,9 +1178,37 @@ impl eframe::App for App {
                     self.layout = typing::layout(&self.layout_spec);
                 }
                 let lay = self.layout.clone();
+                let conflicts: Vec<String> = match self.cfg.macros.get(sel) {
+                    Some(cur) if cur.trigger.is_some() => {
+                        let mut mods = cur.modifiers.clone();
+                        mods.sort_by_key(|k| k.0);
+                        self.cfg
+                            .macros
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, o)| {
+                                let mut om = o.modifiers.clone();
+                                om.sort_by_key(|k| k.0);
+                                *j != sel && o.enabled && o.trigger == cur.trigger && om == mods
+                            })
+                            .map(|(_, o)| o.name.clone())
+                            .collect()
+                    }
+                    _ => vec![],
+                };
                 if let Some(m) = self.cfg.macros.get_mut(sel) {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        macro_editor(ui, m, sel, exclusive, recording, &lay, &mut req, &mut delete);
+                        macro_editor(
+                            ui,
+                            m,
+                            sel,
+                            exclusive,
+                            recording,
+                            &lay,
+                            &conflicts,
+                            &mut req,
+                            &mut delete,
+                        );
                     });
                 } else {
                     ui.centered_and_justified(|ui| ui.weak("No macro selected — click ＋ New"));

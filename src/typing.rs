@@ -276,7 +276,7 @@ pub fn parse(text: &str) -> Result<Vec<Tok>, String> {
                         None => return Err(format!("missing '}}' after '{{{body}'")),
                     }
                 }
-                out.push(parse_token(&body)?);
+                out.extend(parse_token(&body)?);
             }
             c => out.push(Tok::Char(c)),
         }
@@ -284,9 +284,34 @@ pub fn parse(text: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-fn parse_token(body: &str) -> Result<Tok, String> {
+fn symbol_char(name: &str) -> Option<char> {
+    let n = name.trim().to_ascii_lowercase();
+    let n = n.strip_prefix("key_").unwrap_or(&n);
+    Some(match n {
+        "slash" => '/',
+        "backslash" => '\\',
+        "minus" | "dash" | "hyphen" => '-',
+        "equal" | "equals" => '=',
+        "plus" => '+',
+        "semicolon" => ';',
+        "colon" => ':',
+        "apostrophe" | "quote" => '\'',
+        "grave" | "backtick" => '`',
+        "comma" => ',',
+        "dot" | "period" => '.',
+        "leftbrace" | "lbracket" => '[',
+        "rightbrace" | "rbracket" => ']',
+        "question" => '?',
+        "exclaim" => '!',
+        "at" => '@',
+        "hash" => '#',
+        _ => return None,
+    })
+}
+
+fn parse_token(body: &str) -> Result<Vec<Tok>, String> {
     if body.chars().count() == 1 {
-        return Ok(Tok::Char(body.chars().next().unwrap()));
+        return Ok(vec![Tok::Char(body.chars().next().unwrap())]);
     }
     let b = body.trim();
     let mut words = b.split_whitespace();
@@ -300,7 +325,7 @@ fn parse_token(body: &str) -> Result<Tok, String> {
             .and_then(|a| a.parse::<f64>().ok())
             .filter(|ms| *ms >= 0.0)
             .ok_or_else(|| format!("{{{b}}}: expected milliseconds, e.g. {{Wait 100}}"))?;
-        return Ok(Tok::Wait(ms));
+        return Ok(vec![Tok::Wait(ms)]);
     }
     let mut parts: Vec<&str> = head.split('+').collect();
     if head.ends_with("++") {
@@ -313,26 +338,37 @@ fn parse_token(body: &str) -> Result<Tok, String> {
     for m in parts {
         mods.push(key_alias(m).ok_or_else(|| format!("unknown key '{m}' in {{{b}}}"))?);
     }
+    let times = |a: &str| match a.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(n.min(10_000)),
+        _ => Err(format!("{{{b}}}: expected a repeat count, 'down' or 'up'")),
+    };
+    if mods.is_empty() {
+        if let Some(c) = symbol_char(last) {
+            let n = match arg {
+                None => 1,
+                Some(a) => times(a)?,
+            };
+            return Ok(vec![Tok::Char(c); n as usize]);
+        }
+    }
     let key = match key_alias(last) {
         Some(k) => k,
         None if mods.is_empty() && arg.is_none() && last.chars().count() == 1 => {
-            return Ok(Tok::Char(last.chars().next().unwrap()));
+            return Ok(vec![Tok::Char(last.chars().next().unwrap())]);
         }
         None => return Err(format!("unknown key '{last}' in {{{b}}}")),
     };
-    match arg.map(|a| a.to_ascii_lowercase()) {
-        None => Ok(Tok::Combo { mods, key, times: 1 }),
-        Some(a) if a == "down" && mods.is_empty() => Ok(Tok::Down(key)),
-        Some(a) if a == "up" && mods.is_empty() => Ok(Tok::Up(key)),
-        Some(a) => match a.parse::<u32>() {
-            Ok(n) if n >= 1 => Ok(Tok::Combo {
-                mods,
-                key,
-                times: n.min(10_000),
-            }),
-            _ => Err(format!("{{{b}}}: expected a repeat count, 'down' or 'up'")),
+    let tok = match arg.map(|a| a.to_ascii_lowercase()) {
+        None => Tok::Combo { mods, key, times: 1 },
+        Some(a) if a == "down" && mods.is_empty() => Tok::Down(key),
+        Some(a) if a == "up" && mods.is_empty() => Tok::Up(key),
+        Some(a) => Tok::Combo {
+            mods,
+            key,
+            times: times(&a)?,
         },
-    }
+    };
+    Ok(vec![tok])
 }
 
 pub fn untypable(text: &str, lay: &Layout) -> Vec<char> {
@@ -386,6 +422,15 @@ mod tests {
         assert_eq!(t[9], Tok::Down(42));
         assert_eq!(t[10], Tok::Char('+'));
         assert!(parse("{Enter").is_err());
+        assert_eq!(parse("{SLASH}{slash 2}").unwrap(), vec![Tok::Char('/'); 3]);
+        assert_eq!(
+            parse("{Ctrl+SLASH}").unwrap(),
+            vec![Tok::Combo {
+                mods: vec![29],
+                key: 53,
+                times: 1
+            }]
+        );
         assert!(parse("{Bogus}").is_err());
     }
 
