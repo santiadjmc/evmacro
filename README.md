@@ -23,7 +23,7 @@ evmacro works at the kernel input layer (evdev + uinput), so it behaves the same
 Requires Rust (stable) and `libxkbcommon` (installed on practically every Linux desktop).
 
 ```sh
-git clone <this repo> && cd evmacro
+git clone https://github.com/santiadjmc/evmacro && cd evmacro
 cargo build --release
 ./target/release/evmacro
 ```
