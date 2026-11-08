@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Low-latency kernel-level (evdev/uinput) macro tool for Linux with a GUI"
 license = "MIT"
+repository = "https://github.com/santiadjmc/evmacro"
 readme = "README.md"
 keywords = ["macro", "autoclicker", "evdev", "uinput", "linux"]
 categories = ["command-line-utilities", "gui"]

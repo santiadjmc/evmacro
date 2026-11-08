@@ -108,3 +108,7 @@ Many online games forbid macros and automation in their terms of service, and an
 ## License
 
 MIT
+
+---
+
+<p align="center">Made with ❤️ by Santiago Morales</p>
