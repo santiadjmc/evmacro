@@ -285,23 +285,15 @@ pub fn parse(text: &str) -> Result<Vec<Tok>, String> {
 }
 
 fn symbol_char(name: &str) -> Option<char> {
-    let n = name.trim().to_ascii_lowercase();
-    let n = n.strip_prefix("key_").unwrap_or(&n);
-    Some(match n {
-        "slash" => '/',
-        "backslash" => '\\',
-        "minus" | "dash" | "hyphen" => '-',
-        "equal" | "equals" => '=',
+    Some(match name.trim().to_ascii_lowercase().as_str() {
         "plus" => '+',
-        "semicolon" => ';',
+        "dash" | "hyphen" => '-',
         "colon" => ':',
-        "apostrophe" | "quote" => '\'',
-        "grave" | "backtick" => '`',
-        "comma" => ',',
-        "dot" | "period" => '.',
-        "leftbrace" | "lbracket" => '[',
-        "rightbrace" | "rbracket" => ']',
-        "question" => '?',
+        "period" => '.',
+        "quote" => '\'',
+        "backtick" => '`',
+        "lbracket" => '[',
+        "rbracket" => ']',
         "exclaim" => '!',
         "at" => '@',
         "hash" => '#',
@@ -342,7 +334,7 @@ fn parse_token(body: &str) -> Result<Vec<Tok>, String> {
         Ok(n) if n >= 1 => Ok(n.min(10_000)),
         _ => Err(format!("{{{b}}}: expected a repeat count, 'down' or 'up'")),
     };
-    if mods.is_empty() {
+    if mods.is_empty() && key_alias(last).is_none() {
         if let Some(c) = symbol_char(last) {
             let n = match arg {
                 None => 1,
@@ -422,7 +414,18 @@ mod tests {
         assert_eq!(t[9], Tok::Down(42));
         assert_eq!(t[10], Tok::Char('+'));
         assert!(parse("{Enter").is_err());
-        assert_eq!(parse("{SLASH}{slash 2}").unwrap(), vec![Tok::Char('/'); 3]);
+        assert_eq!(
+            parse("{SLASH}").unwrap(),
+            vec![Tok::Combo {
+                mods: vec![],
+                key: 53,
+                times: 1
+            }]
+        );
+        assert_eq!(
+            parse("{plus}{At 2}").unwrap(),
+            vec![Tok::Char('+'), Tok::Char('@'), Tok::Char('@')]
+        );
         assert_eq!(
             parse("{Ctrl+SLASH}").unwrap(),
             vec![Tok::Combo {
