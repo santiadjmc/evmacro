@@ -41,6 +41,20 @@ fn d50() -> f64 {
 fn one() -> u32 {
     1
 }
+fn yes() -> bool {
+    true
+}
+fn left() -> K {
+    K(0x110)
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClickMethod {
+    #[default]
+    Pointer,
+    Touch,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -148,6 +162,16 @@ pub enum Step {
         text: String,
         #[serde(default = "d8")]
         char_ms: f64,
+    },
+    Click {
+        x: i32,
+        y: i32,
+        #[serde(default = "left")]
+        button: K,
+        #[serde(default)]
+        method: ClickMethod,
+        #[serde(default = "yes")]
+        back: bool,
     },
 }
 

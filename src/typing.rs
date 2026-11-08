@@ -1,3 +1,4 @@
+use crate::config::ClickMethod;
 use crate::keys;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -214,10 +215,21 @@ pub fn layout(cfg_value: &str) -> Arc<Layout> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
     Char(char),
-    Combo { mods: Vec<u16>, key: u16, times: u32 },
+    Combo {
+        mods: Vec<u16>,
+        key: u16,
+        times: u32,
+    },
     Down(u16),
     Up(u16),
     Wait(f64),
+    Click {
+        x: i32,
+        y: i32,
+        button: u16,
+        method: ClickMethod,
+        back: bool,
+    },
 }
 
 fn key_alias(name: &str) -> Option<u16> {
@@ -306,6 +318,9 @@ fn parse_token(body: &str) -> Result<Vec<Tok>, String> {
         return Ok(vec![Tok::Char(body.chars().next().unwrap())]);
     }
     let b = body.trim();
+    if let Some(t) = parse_click(b)? {
+        return Ok(vec![t]);
+    }
     let mut words = b.split_whitespace();
     let head = words.next().ok_or("empty {}")?;
     let arg = words.next();
@@ -363,6 +378,40 @@ fn parse_token(body: &str) -> Result<Vec<Tok>, String> {
     Ok(vec![tok])
 }
 
+fn parse_click(b: &str) -> Result<Option<Tok>, String> {
+    let w: Vec<&str> = b.split_whitespace().collect();
+    let method = match w.first().map(|h| h.to_ascii_lowercase()) {
+        Some(h) if h == "click" => ClickMethod::Pointer,
+        Some(h) if h == "tap" || h == "touch" => ClickMethod::Touch,
+        _ => return Ok(None),
+    };
+    let usage = || format!("{{{b}}}: expected {{Click X Y}}, {{Click X Y right}}, {{Click X Y stay}} or {{Tap X Y}}");
+    if w.len() < 3 {
+        return Err(usage());
+    }
+    let x: i32 = w[1].parse().map_err(|_| usage())?;
+    let y: i32 = w[2].parse().map_err(|_| usage())?;
+    let mut button = 0x110;
+    let mut back = true;
+    for opt in &w[3..] {
+        match opt.to_ascii_lowercase().as_str() {
+            "left" => button = 0x110,
+            "right" => button = 0x111,
+            "middle" => button = 0x112,
+            "stay" => back = false,
+            "back" => back = true,
+            _ => return Err(usage()),
+        }
+    }
+    Ok(Some(Tok::Click {
+        x,
+        y,
+        button,
+        method,
+        back,
+    }))
+}
+
 pub fn untypable(text: &str, lay: &Layout) -> Vec<char> {
     let mut v: Vec<char> = Vec::new();
     if let Ok(toks) = parse(text) {
@@ -414,6 +463,26 @@ mod tests {
         assert_eq!(t[9], Tok::Down(42));
         assert_eq!(t[10], Tok::Char('+'));
         assert!(parse("{Enter").is_err());
+        assert_eq!(
+            parse("{Click 10 20 right stay}{Tap 5 6}").unwrap(),
+            vec![
+                Tok::Click {
+                    x: 10,
+                    y: 20,
+                    button: 0x111,
+                    method: ClickMethod::Pointer,
+                    back: false
+                },
+                Tok::Click {
+                    x: 5,
+                    y: 6,
+                    button: 0x110,
+                    method: ClickMethod::Touch,
+                    back: true
+                },
+            ]
+        );
+        assert!(parse("{Click 10}").is_err());
         assert_eq!(
             parse("{SLASH}").unwrap(),
             vec![Tok::Combo {

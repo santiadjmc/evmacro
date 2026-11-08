@@ -1,14 +1,18 @@
-use crate::config::{Action, Config, Macro, Mode, Step, K};
+use crate::config::{Action, ClickMethod, Config, Macro, Mode, Step, K};
+use crate::cursor;
 use crate::keys;
 use crate::typing::{self, Layout, Tok};
 use evdev::uinput::{VirtualDevice, VirtualDeviceBuilder};
-use evdev::{AttributeSet, Device, EventType, InputEvent, Key, RelativeAxisType};
+use evdev::{
+    AbsInfo, AbsoluteAxisType, AttributeSet, Device, EventType, InputEvent, Key, PropType, RelativeAxisType,
+    UinputAbsSetup,
+};
 use parking_lot::{Mutex, RwLock};
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering::*};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,6 +66,9 @@ pub struct Shared {
     pub devices: Mutex<BTreeMap<PathBuf, DevInfo>>,
     pub log: Mutex<VecDeque<String>>,
     t0: Instant,
+    pointer: Mutex<Option<VirtualDevice>>,
+    touch: Mutex<Option<VirtualDevice>>,
+    touch_id: AtomicI32,
 }
 
 fn key_ev(code: u16, value: i32) -> InputEvent {
@@ -72,6 +79,90 @@ fn rel_ev(code: u16, value: i32) -> InputEvent {
 }
 fn dur_ms(ms: f64) -> Duration {
     Duration::from_secs_f64(ms.max(0.0) / 1000.0)
+}
+
+const ABS_MAX: i32 = 32767;
+const POINTER_NAME: &str = "evmacro virtual pointer";
+const TOUCH_NAME: &str = "evmacro virtual touch";
+
+fn abs_axis(code: AbsoluteAxisType, max: i32, res: i32) -> UinputAbsSetup {
+    UinputAbsSetup::new(code, AbsInfo::new(0, 0, max, 0, 0, res))
+}
+
+fn abs_ev(code: AbsoluteAxisType, value: i32) -> InputEvent {
+    InputEvent::new(EventType::ABSOLUTE, code.0, value)
+}
+
+fn build_pointer() -> std::io::Result<VirtualDevice> {
+    let mut keyset = AttributeSet::<Key>::new();
+    for k in [Key::BTN_LEFT, Key::BTN_RIGHT, Key::BTN_MIDDLE] {
+        keyset.insert(k);
+    }
+    VirtualDeviceBuilder::new()?
+        .name(POINTER_NAME)
+        .with_keys(&keyset)?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_X, ABS_MAX, 0))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_Y, ABS_MAX, 0))?
+        .build()
+}
+
+fn build_touch() -> std::io::Result<VirtualDevice> {
+    let mut keyset = AttributeSet::<Key>::new();
+    keyset.insert(Key::BTN_TOUCH);
+    let mut props = AttributeSet::<PropType>::new();
+    props.insert(PropType::DIRECT);
+    VirtualDeviceBuilder::new()?
+        .name(TOUCH_NAME)
+        .with_keys(&keyset)?
+        .with_properties(&props)?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_X, ABS_MAX, 100))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_Y, ABS_MAX, 100))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_MT_SLOT, 9, 0))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_MT_TRACKING_ID, 65535, 0))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_MT_POSITION_X, ABS_MAX, 100))?
+        .with_absolute_axis(&abs_axis(AbsoluteAxisType::ABS_MT_POSITION_Y, ABS_MAX, 100))?
+        .build()
+}
+
+fn to_abs(x: i32, y: i32, g: &cursor::Info) -> (i32, i32) {
+    let conv = |v: f64, origin: f64, size: f64| {
+        let a = ((v - origin + 0.5) * (ABS_MAX as f64 + 1.0) / size.max(1.0)).floor();
+        a.clamp(0.0, ABS_MAX as f64) as i32
+    };
+    (conv(x as f64, g.sx, g.sw), conv(y as f64, g.sy, g.sh))
+}
+
+fn config_click_methods(cfg: &Config) -> (bool, bool) {
+    let (mut pointer, mut touch) = (false, false);
+    let mut note = |m: ClickMethod| match m {
+        ClickMethod::Pointer => pointer = true,
+        ClickMethod::Touch => touch = true,
+    };
+    for m in cfg.macros.iter().filter(|m| m.enabled) {
+        let texts: Vec<&str> = match &m.action {
+            Action::Type { text, .. } => vec![text.as_str()],
+            Action::Sequence { steps, .. } => steps
+                .iter()
+                .filter_map(|s| match s {
+                    Step::Type { text, .. } => Some(text.as_str()),
+                    Step::Click { method, .. } => {
+                        note(*method);
+                        None
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![],
+        };
+        for t in texts {
+            for tok in typing::parse(t).unwrap_or_default() {
+                if let Tok::Click { method, .. } = tok {
+                    note(method);
+                }
+            }
+        }
+    }
+    (pointer, touch)
 }
 
 fn build_virtual() -> std::io::Result<VirtualDevice> {
@@ -119,6 +210,9 @@ impl Shared {
             devices: Mutex::default(),
             log: Mutex::default(),
             t0: Instant::now(),
+            pointer: Mutex::new(None),
+            touch: Mutex::new(None),
+            touch_id: AtomicI32::new(1),
         });
         let s2 = sh.clone();
         thread::Builder::new()
@@ -128,6 +222,7 @@ impl Shared {
         thread::spawn(move || {
             typing::layout(&spec);
         });
+        sh.prewarm_click_devices();
         sh.log(format!(
             "Engine started ({})",
             if sh.enabled.load(Relaxed) {
@@ -155,6 +250,145 @@ impl Shared {
         }
         if let Err(e) = self.out.lock().emit(evs) {
             self.log(format!("uinput write failed: {e}"));
+        }
+    }
+
+    fn ensure_device(
+        &self,
+        slot: &Mutex<Option<VirtualDevice>>,
+        build: fn() -> std::io::Result<VirtualDevice>,
+        what: &str,
+    ) -> bool {
+        let mut d = slot.lock();
+        if d.is_some() {
+            return true;
+        }
+        match build() {
+            Ok(v) => {
+                *d = Some(v);
+                drop(d);
+                self.log(format!("Created virtual {what}"));
+                thread::sleep(Duration::from_millis(300));
+                true
+            }
+            Err(e) => {
+                self.log(format!("Could not create virtual {what}: {e}"));
+                false
+            }
+        }
+    }
+
+    fn emit_on(&self, slot: &Mutex<Option<VirtualDevice>>, evs: &[InputEvent]) {
+        if let Some(d) = slot.lock().as_mut() {
+            if let Err(e) = d.emit(evs) {
+                self.log(format!("uinput write failed: {e}"));
+            }
+        }
+    }
+
+    fn prewarm_click_devices(self: &Arc<Self>) {
+        let (p, t) = config_click_methods(&self.config.read());
+        if !p && !t {
+            return;
+        }
+        let sh = self.clone();
+        thread::spawn(move || {
+            if p {
+                sh.ensure_device(&sh.pointer, build_pointer, "pointer");
+            }
+            if t {
+                sh.ensure_device(&sh.touch, build_touch, "touchscreen");
+            }
+            let _ = cursor::geometry();
+        });
+    }
+
+    fn move_pointer(&self, ax: i32, ay: i32) {
+        let nudge = |v: i32| if v < ABS_MAX { v + 1 } else { v - 1 };
+        self.emit_on(
+            &self.pointer,
+            &[
+                abs_ev(AbsoluteAxisType::ABS_X, nudge(ax)),
+                abs_ev(AbsoluteAxisType::ABS_Y, nudge(ay)),
+                abs_ev(AbsoluteAxisType::ABS_X, ax),
+                abs_ev(AbsoluteAxisType::ABS_Y, ay),
+            ],
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn click_at(
+        &self,
+        x: i32,
+        y: i32,
+        button: u16,
+        method: ClickMethod,
+        back: bool,
+        hold: Duration,
+        stop: &AtomicBool,
+    ) -> bool {
+        let pause = |d: Duration| wait_until(Instant::now() + d, stop);
+        match method {
+            ClickMethod::Touch => {
+                let g = match cursor::geometry() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.log(e);
+                        return true;
+                    }
+                };
+                if !self.ensure_device(&self.touch, build_touch, "touchscreen") {
+                    return true;
+                }
+                let (ax, ay) = to_abs(x, y, &g);
+                let id = self.touch_id.fetch_add(1, Relaxed) & 0xffff;
+                self.emit_on(
+                    &self.touch,
+                    &[
+                        abs_ev(AbsoluteAxisType::ABS_MT_SLOT, 0),
+                        abs_ev(AbsoluteAxisType::ABS_MT_TRACKING_ID, id),
+                        abs_ev(AbsoluteAxisType::ABS_MT_POSITION_X, ax),
+                        abs_ev(AbsoluteAxisType::ABS_MT_POSITION_Y, ay),
+                        abs_ev(AbsoluteAxisType::ABS_X, ax),
+                        abs_ev(AbsoluteAxisType::ABS_Y, ay),
+                        key_ev(Key::BTN_TOUCH.code(), 1),
+                    ],
+                );
+                let ok = pause(hold.max(Duration::from_millis(20)));
+                self.emit_on(
+                    &self.touch,
+                    &[
+                        abs_ev(AbsoluteAxisType::ABS_MT_TRACKING_ID, -1),
+                        key_ev(Key::BTN_TOUCH.code(), 0),
+                    ],
+                );
+                ok
+            }
+            ClickMethod::Pointer => {
+                let info = if back { cursor::query() } else { cursor::geometry() };
+                let g = match info {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.log(e);
+                        return true;
+                    }
+                };
+                if !self.ensure_device(&self.pointer, build_pointer, "pointer") {
+                    return true;
+                }
+                let (ax, ay) = to_abs(x, y, &g);
+                self.move_pointer(ax, ay);
+                thread::sleep(Duration::from_millis(12));
+                self.emit_on(&self.pointer, &[key_ev(button, 1)]);
+                let ok = pause(hold.max(Duration::from_millis(10)));
+                self.emit_on(&self.pointer, &[key_ev(button, 0)]);
+                if back {
+                    thread::sleep(Duration::from_millis(12));
+                    let (bx, by) = to_abs(g.x.round() as i32, g.y.round() as i32, &g);
+                    self.move_pointer(bx, by);
+                }
+                ok
+            }
         }
     }
 
@@ -188,7 +422,7 @@ impl Shared {
         }
     }
 
-    pub fn apply_config(&self, new: Config) {
+    pub fn apply_config(self: &Arc<Self>, new: Config) {
         let new = Arc::new(new);
         *self.config.write() = new.clone();
         self.runners.lock().retain(|i, r| {
@@ -209,6 +443,7 @@ impl Shared {
         for k in release {
             self.release_keys(&k);
         }
+        self.prewarm_click_devices();
     }
 
     pub fn running(&self) -> HashSet<usize> {
@@ -530,7 +765,7 @@ fn type_tokens(o: &mut Out, toks: &[Tok], lay: &Layout, tm: Timing, stop: &Atomi
         if stop.load(Relaxed) {
             return false;
         }
-        if after_text && matches!(t, Tok::Combo { .. } | Tok::Down(_)) {
+        if after_text && matches!(t, Tok::Combo { .. } | Tok::Down(_) | Tok::Click { .. }) {
             after_text = false;
             if !pause(settle) {
                 return false;
@@ -585,6 +820,17 @@ fn type_tokens(o: &mut Out, toks: &[Tok], lay: &Layout, tm: Timing, stop: &Atomi
             Tok::Wait(ms) => {
                 after_text = false;
                 if !pause(dur_ms(*ms)) {
+                    return false;
+                }
+            }
+            Tok::Click {
+                x,
+                y,
+                button,
+                method,
+                back,
+            } => {
+                if !o.sh.click_at(*x, *y, *button, *method, *back, hold, stop) || !pause(gap) {
                     return false;
                 }
             }
@@ -658,7 +904,7 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
             let timed = steps.iter().any(|s| match s {
                 Step::Wait { ms } => *ms > 0.0,
                 Step::Tap { hold_ms, .. } => *hold_ms > 0.0,
-                Step::Type { .. } => true,
+                Step::Type { .. } | Step::Click { .. } => true,
                 _ => false,
             });
             let lay = steps
@@ -707,6 +953,21 @@ fn run_action(o: &mut Out, action: &Action, stop: &AtomicBool, lay_spec: &str) {
                         }
                         Step::HWheel { amount } => {
                             o.sh.emit(&[rel_ev(REL_HWHEEL, *amount), rel_ev(REL_HWHEEL_HI_RES, amount * 120)])
+                        }
+                        Step::Click {
+                            x,
+                            y,
+                            button,
+                            method,
+                            back,
+                        } => {
+                            if !o
+                                .sh
+                                .click_at(*x, *y, button.0, *method, *back, Duration::from_millis(10), stop)
+                            {
+                                return;
+                            }
+                            t = Instant::now();
                         }
                         Step::Type { text, char_ms } => {
                             let (Ok(toks), Some(lay)) = (typing::parse(text), lay.as_ref()) else {
@@ -933,14 +1194,18 @@ fn scanner(sh: Arc<Shared>) {
                 let sys = Path::new("/sys/class/input")
                     .join(p.file_name().unwrap())
                     .join("device/name");
-                if std::fs::read_to_string(sys).is_ok_and(|n| n.trim() == VIRT_NAME) {
+                if std::fs::read_to_string(sys).is_ok_and(|n| n.trim().starts_with("evmacro")) {
                     ignored.insert(p);
                     continue;
                 }
                 match Device::open(&p) {
                     Ok(d) => {
                         let name = d.name().unwrap_or("?").to_string();
-                        let Some(kind) = (if name == VIRT_NAME { None } else { classify(&d) }) else {
+                        let Some(kind) = (if name.starts_with("evmacro") {
+                            None
+                        } else {
+                            classify(&d)
+                        }) else {
                             ignored.insert(p);
                             continue;
                         };

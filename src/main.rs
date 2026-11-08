@@ -1,4 +1,5 @@
 mod config;
+mod cursor;
 mod engine;
 mod feedback;
 mod gui;
@@ -81,7 +82,7 @@ fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
-fn headless_loop(sh: &engine::Shared, path: &Path) -> ! {
+fn headless_loop(sh: &std::sync::Arc<engine::Shared>, path: &Path) -> ! {
     sh.log(format!("Headless mode, watching {}", path.display()));
     let mut last = mtime(path);
     loop {

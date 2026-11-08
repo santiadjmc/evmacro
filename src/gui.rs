@@ -1,4 +1,5 @@
-use crate::config::{self, Action, Config, Macro, Mode, Step, K};
+use crate::config::{self, Action, ClickMethod, Config, Macro, Mode, Step, K};
+use crate::cursor;
 use crate::engine::{Capture, Shared};
 use crate::keys;
 use crate::typing::{self, Layout};
@@ -30,9 +31,15 @@ enum Bind {
     RemapTo(usize),
     StepKey(usize, usize),
     TypeInsert(usize),
+    ClickPos(usize, usize),
+    TypeClick(usize),
 }
 
 impl Bind {
+    fn is_position(self) -> bool {
+        matches!(self, Bind::ClickPos(..) | Bind::TypeClick(_))
+    }
+
     fn clearable(self) -> bool {
         matches!(self, Bind::Toggle | Bind::RecordStop | Bind::Trigger(_))
     }
@@ -170,6 +177,7 @@ fn step_kind(s: &Step) -> &'static str {
         Step::Wheel { .. } => "Wheel",
         Step::HWheel { .. } => "HWheel",
         Step::Type { .. } => "Type",
+        Step::Click { .. } => "Click",
     }
 }
 
@@ -192,11 +200,78 @@ fn new_step(kind: &str, key: K) -> Step {
             text: String::new(),
             char_ms: 8.0,
         },
+        "Click" => Step::Click {
+            x: 0,
+            y: 0,
+            button: K(0x110),
+            method: ClickMethod::Pointer,
+            back: true,
+        },
         _ => Step::HWheel { amount: 1 },
     }
 }
 
-const STEP_KINDS: [&str; 8] = ["Tap", "Down", "Up", "Wait", "Type", "Move", "Wheel", "HWheel"];
+const STEP_KINDS: [&str; 9] = ["Tap", "Down", "Up", "Wait", "Type", "Click", "Move", "Wheel", "HWheel"];
+
+const HOW: [&str; 3] = ["Jump & return", "Move there", "Touch tap"];
+
+fn click_editor(
+    ui: &mut egui::Ui,
+    id: (usize, usize),
+    x: &mut i32,
+    y: &mut i32,
+    button: &mut K,
+    method: &mut ClickMethod,
+    back: &mut bool,
+) -> bool {
+    ui.label("x");
+    ui.add(egui::DragValue::new(x).range(-100_000..=100_000));
+    ui.label("y");
+    ui.add(egui::DragValue::new(y).range(-100_000..=100_000));
+    let pick = ui
+        .button("📍 Pick")
+        .on_hover_text("Hover the mouse over the spot, then press any key")
+        .clicked();
+    let cur = match (*method, *back) {
+        (ClickMethod::Touch, _) => 2,
+        (ClickMethod::Pointer, true) => 0,
+        (ClickMethod::Pointer, false) => 1,
+    };
+    let mut how = cur;
+    egui::ComboBox::from_id_salt(("how", id.0, id.1))
+        .selected_text(HOW[cur])
+        .width(120.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut how, 0, HOW[0])
+                .on_hover_text("Cursor jumps there, clicks, and comes back (works everywhere)");
+            ui.selectable_value(&mut how, 1, HOW[1])
+                .on_hover_text("Cursor moves there and clicks");
+            ui.selectable_value(&mut how, 2, HOW[2])
+                .on_hover_text("Touchscreen tap: the cursor never moves (app must accept touch)");
+        });
+    if how != cur {
+        (*method, *back) = match how {
+            0 => (ClickMethod::Pointer, true),
+            1 => (ClickMethod::Pointer, false),
+            _ => (ClickMethod::Touch, true),
+        };
+    }
+    if *method == ClickMethod::Pointer {
+        egui::ComboBox::from_id_salt(("btn", id.0, id.1))
+            .selected_text(match button.0 {
+                0x111 => "Right",
+                0x112 => "Middle",
+                _ => "Left",
+            })
+            .width(70.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(button, K(0x110), "Left");
+                ui.selectable_value(button, K(0x111), "Right");
+                ui.selectable_value(button, K(0x112), "Middle");
+            });
+    }
+    pick
+}
 
 #[allow(clippy::too_many_arguments)]
 fn macro_editor(
@@ -495,6 +570,17 @@ fn macro_editor(
                                         ui.add(egui::DragValue::new(amount).range(-100..=100));
                                         ui.weak("notches");
                                     }
+                                    Step::Click {
+                                        x,
+                                        y,
+                                        button,
+                                        method,
+                                        back,
+                                    } => {
+                                        if click_editor(ui, (i, si), x, y, button, method, back) {
+                                            *req = Some(Req::Bind(Bind::ClickPos(i, si)));
+                                        }
+                                    }
                                     Step::Type { text, char_ms } => {
                                         ui.add(
                                             egui::TextEdit::singleline(text)
@@ -573,6 +659,13 @@ fn macro_editor(
                     .clicked()
                 {
                     *req = Some(Req::Bind(Bind::TypeInsert(i)));
+                }
+                if ui
+                    .small_button("📍 Click…")
+                    .on_hover_text("Hover over a spot and press any key to insert {Click X Y}")
+                    .clicked()
+                {
+                    *req = Some(Req::Bind(Bind::TypeClick(i)));
                 }
             });
             match typing::parse(text) {
@@ -706,6 +799,7 @@ impl App {
             }
         };
         match b {
+            Bind::ClickPos(..) | Bind::TypeClick(_) => {}
             Bind::Toggle => self.cfg.toggle_key = k,
             Bind::RecordStop => self.cfg.record_stop_key = k,
             Bind::Trigger(i) => {
@@ -766,10 +860,44 @@ impl App {
         }
     }
 
+    fn apply_position(&mut self, b: Bind, px: i32, py: i32) {
+        match b {
+            Bind::ClickPos(i, s) => {
+                if let Some(Macro {
+                    action: Action::Sequence { steps, .. },
+                    ..
+                }) = self.cfg.macros.get_mut(i)
+                {
+                    if let Some(Step::Click { x, y, .. }) = steps.get_mut(s) {
+                        (*x, *y) = (px, py);
+                    }
+                }
+            }
+            Bind::TypeClick(i) => {
+                if let Some(Macro {
+                    action: Action::Type { text, .. },
+                    ..
+                }) = self.cfg.macros.get_mut(i)
+                {
+                    text.push_str(&format!("{{Click {px} {py}}}"));
+                }
+            }
+            _ => {}
+        }
+        self.sh.log(format!("Picked position {px}, {py}"));
+    }
+
     fn poll_engine(&mut self) {
         if let Some(b) = self.bind {
             let cap = *self.sh.capture.lock();
             match cap {
+                Capture::Got(_) if b.is_position() => {
+                    self.close_bind();
+                    match cursor::query() {
+                        Ok(p) => self.apply_position(b, p.x.round() as i32, p.y.round() as i32),
+                        Err(e) => self.sh.log(format!("Pick position failed: {e}")),
+                    }
+                }
                 Capture::Got(c) => {
                     self.apply_bind(b, Some(c));
                     self.close_bind();
@@ -1124,6 +1252,33 @@ impl App {
         let Some(b) = self.bind else { return };
         let mut chosen: Option<Option<u16>> = None;
         let mut cancel = false;
+        if b.is_position() {
+            egui::Window::new("Pick a position")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    {
+                        let mut cap = self.sh.capture.lock();
+                        if *cap == Capture::Idle {
+                            *cap = Capture::Waiting;
+                        }
+                    }
+                    ui.label(
+                        RichText::new("Hover over the spot, then press any key")
+                            .size(17.0)
+                            .strong(),
+                    );
+                    ui.weak("The cursor position is read when you press it. Esc cancels.");
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            if cancel {
+                self.close_bind();
+            }
+            return;
+        }
         egui::Window::new("Choose key")
             .collapsible(false)
             .resizable(false)

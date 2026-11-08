@@ -7,8 +7,9 @@ evmacro works at the kernel input layer (evdev + uinput), so it behaves the same
 ## Features
 
 - **Repeat**: autoclicker / key spammer with interval (or clicks per second), press duration, random jitter and repeat count
-- **Sequence**: steps (tap, down, up, wait, type, mouse move, wheel) with speed and loop count, plus a **recorder** that captures your keys, clicks and timing
+- **Sequence**: steps (tap, down, up, wait, type, click at position, mouse move, wheel) with speed and loop count, plus a **recorder** that captures your keys, clicks and timing
 - **Type text**: types strings using your real keyboard layout (accents, AltGr symbols, dead keys), with `{Enter}`, `{Ctrl+C}`, `{Wait 100}` tokens
+- **Click at screen positions**: jump-click-and-return, move-and-click, or a touch tap that never moves the cursor, with a hover-and-press position picker (KDE Plasma)
 - **Remap**: make any key or mouse button act as another key or a combo
 - **Hold** or **Toggle** modes, optional modifier keys (e.g. Ctrl + Mouse 5), optional blocking of the trigger key
 - Global **enable/disable key** with sound and desktop-notification feedback
@@ -62,9 +63,19 @@ With *Exclusive input* on (default), evmacro grabs your keyboards and mice and f
 | `{Tab 3}` | press 3 times |
 | `{Shift down}` / `{Shift up}` | hold / release |
 | `{Wait 250}` | pause in milliseconds |
+| `{Click 640 360}` | click there, cursor returns afterwards |
+| `{Click 640 360 right}` / `{Click 640 360 stay}` | right click / leave the cursor there |
+| `{Tap 640 360}` | touch tap, the cursor does not move |
 | `{{` `}}` | literal braces |
 
 The keyboard layout is detected automatically (KDE, systemd-localed, `XKB_DEFAULT_LAYOUT`) and can be set in Settings, e.g. `latam`, `es`, `us(intl)`.
+
+### Clicking at positions
+
+Click steps and `{Click}` / `{Tap}` tokens use screen coordinates in logical pixels. Use **📍 Pick**: hover over the target and press any key. Reading the cursor position and screen size uses KWin scripting, so this currently requires **KDE Plasma** (Wayland or X11).
+
+- **Jump & return**: an absolute virtual pointer moves to the spot, clicks, and puts the cursor back within a few tens of milliseconds. Works in practically every app and game.
+- **Touch tap**: a virtual touchscreen taps the spot and the cursor never moves. The target app must accept touch input. On multi-monitor setups touch maps to the output KWin assigns to touchscreens.
 
 ## Configuration
 
