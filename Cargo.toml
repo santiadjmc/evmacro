@@ -1,0 +1,27 @@
+[package]
+name = "evmacro"
+version = "0.1.0"
+edition = "2021"
+description = "Low-latency kernel-level (evdev/uinput) macro tool for Linux with a GUI"
+license = "MIT"
+readme = "README.md"
+keywords = ["macro", "autoclicker", "evdev", "uinput", "linux"]
+categories = ["command-line-utilities", "gui"]
+
+[dependencies]
+evdev = "0.12"
+eframe = "0.29"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+parking_lot = "0.12"
+rand = "0.8"
+libc = "0.2"
+dirs = "5"
+xkbcommon = { version = "0.8", default-features = false }
+unicode-normalization = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
