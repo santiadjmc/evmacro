@@ -692,9 +692,9 @@ fn macro_editor(
                     (
                         "Game-safe",
                         "Games that read input once per frame (60 FPS or lower)",
-                        20.0,
-                        20.0,
-                        120.0,
+                        8.5,
+                        9.0,
+                        100.0,
                     ),
                 ] {
                     let on = *char_ms == c && *hold_ms == h && *settle_ms == s;
